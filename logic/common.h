@@ -7,11 +7,15 @@
 
 #include "../utils/hashmap.h"
 
-#define MSGSIZE 500
+#define MSG_SIZE 500
 #define PORT 5000
 #define PLACETAKEN ""
 int bufferSize=60000;
-
+#ifdef DGRAM
+#define CONN_MODE SOCK_DGRAM
+#else
+#define CONN_MODE SOCK_STREAM
+#endif
 enum connectType {
     NETWORK,
     UNIX

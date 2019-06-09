@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <unistd.h>
 
 struct table *createTable(int size) {
     struct table *t = (struct table *) malloc(sizeof(struct table));
@@ -86,6 +87,7 @@ char *parseText(char *text) {
             word_list->next = new_word;
         }
         sum++;
+//        sleep(1000);
     } while ((word = strtok(NULL, " ,-:/?!()[]\n")) != NULL);
 
     char* buf=calloc(60000, sizeof(char));

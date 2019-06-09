@@ -11,17 +11,22 @@
 #include <arpa/inet.h>
 #include "common.h"
 
+#include <sys/epoll.h>
+#include <sys/un.h>
+
+#define MAX_EVENTS 1000
+
 //udp size
 //65,507
-int sock;
 int global_counter = 0;
+int inet_sock;
+int unix_sock;
 
 struct client_node {
     char name[100];
     int busy;
     enum connectType connection_type;
-    int socket;
-    int connection;
+    int sock;
     struct sockaddr_in addr;
     struct client_node *next;
 };
@@ -34,17 +39,14 @@ char *read_file_content(char *filepath) {
     fseek(f, 0, SEEK_SET);
     char *string = malloc(fsize + 1);
     fread(string, fsize, 1, f);
-
     fclose(f);
-
     string[fsize] = 0;
 
     return string;
 }
 
-int is_used(const char *name) {
+int is_used(char *name) {
     struct client_node *tmp = clients;
-
     while (tmp != NULL) {
         if (strcmp(tmp->name, name) == 0)
             return 1;
@@ -53,12 +55,12 @@ int is_used(const char *name) {
     return 0;
 }
 
-struct sockaddr_in *find_client_addr(char *name) {
+struct client_node *find_client(char *name) {
     struct client_node *tmp = clients;
 
     while (tmp != NULL) {
         if (strcmp(tmp->name, name) == 0)
-            return &tmp->addr;
+            return tmp;
         tmp = tmp->next;
     }
     return NULL;
@@ -81,98 +83,163 @@ void unregister(char *name) {
 }
 
 void register_client(char *name, int connection, struct sockaddr_in *client, int socket) {
-
     fflush(stdout);
-    struct sockaddr_in *address = find_client_addr(name);
-
+    struct sockaddr *address;
+    address = (struct sockaddr *) &find_client(name)->addr;
+    printf("asked to register %s\n", name);
     if (is_used(name)) {
-        if (address != client) exit(-1);
         sendto(connection, PLACETAKEN, sizeof(PLACETAKEN), 0, (struct sockaddr *) address, sizeof(address));
     } else {
         struct client_node *new_client = calloc(1, sizeof(struct client_node));
         strcpy(new_client->name, name);
         new_client->addr = *client;
-        new_client->socket = socket;
-        new_client->connection=connection;
+        new_client->sock = connection;
         new_client->next = clients->next;
         clients->next = new_client;
 
-        printf("registered %s with addr %d\n", name, client->sin_addr.s_addr);
-
-        sendto(connection, name, sizeof(name), 0, (struct sockaddr *) address, sizeof(address));
+        printf("registered %s with addr %u\n", name, client->sin_addr.s_addr);
+        sendto(connection, name, sizeof(name), 0, NULL, 0);
     }
 }
 
 int flag = 1;
 
 void *keep_alive(void *pVoid) {
-//    while (flag) {
-//        sleep(10);
-//        printf("PINGING CLIENTS\n");
-//        struct client_node *tmp = clients;
-//
-//        while (tmp->next != NULL) {
-//            struct client_node *tmp2 = tmp->next;
-//            if (sendto(tmp2->socket, "PING", 4, MSG_NOSIGNAL, (struct sockaddr *) &tmp2->addr, sizeof(tmp2->addr)) ==
-//                -1) {
-//                perror("dead");
-//                printf("%s IS KILL, UNREGISTERING\n", tmp2->name);
-//                unregister(tmp2->name);
-//            } else {
-//                printf("%s IS OK\n", tmp2->name);
-//                tmp = tmp->next;
-//            }
-//        }
-//    }
+    while (flag) {
+        sleep(10);
+        printf("PINGING CLIENTS\n");
+        struct client_node *tmp = clients;
+
+        while (tmp->next != NULL) {
+            struct client_node *tmp2 = tmp->next;
+            if (sendto(tmp2->sock, "PING", 4, MSG_NOSIGNAL, (struct sockaddr *) &tmp2->addr, sizeof(tmp2->addr)) ==
+                -1) {
+                perror("dead");
+                printf("%s IS KILL, UNREGISTERING\n", tmp2->name);
+                unregister(tmp2->name);
+            } else {
+                printf("%s IS OK\n", tmp2->name);
+                tmp = tmp->next;
+            }
+        }
+    }
     return 0;
 }
 
 void *handle_client(int connection, struct sockaddr_in *client, int socket) {
     char buf[bufferSize];
+    memset(buf, 0, sizeof(buf));
     int size;
 
-    while (1) {
-        size = recvfrom(connection, buf, sizeof(buf), 0, NULL, NULL);
+    size = recvfrom(connection, buf, sizeof(buf), 0, NULL, NULL);
 
-        if (size <= 0) {
-            return NULL;
-        }
-        printf("rozmiar paczki: %d\n"
-               "treść:%s\n",
-               size, buf);
+    if (size <= 0) {
+        return NULL;
+    }
 
-        char *command = strtok(buf, "|");
-        char *rest = strtok(NULL, "|");
-        if (rest == NULL) {
-            printf("INCORRECT COMMAND ARRIVED:\n");
-            if(command!=NULL)
-                printf("%s\n", command);
-//            continue;
-        }
+    printf("rozmiar paczki: %d\n"
+           "treść:\n"
+           "%s\n",
+           size, buf);
 
+    char *command = strtok(buf, "|");
+    char *rest = strtok(NULL, "|");
+    if (rest == NULL) {
+        printf("INCORRECT COMMAND ARRIVED:\n");
+        if (command != NULL)
+            printf("%s\n", command);
+    } else {
         if (strcmp(command, "INIT") == 0) {
             register_client(rest, connection, client, socket);
         } else if (strcmp(command, "UNREGISTER") == 0) {
             unregister(rest);
         } else if (strcmp(command, "RESULTS") == 0) {
-            printf("%s", rest);
+            printf("RESULTS:\n %s", rest);
         }
-
     }
+
+    //close(connection);
     return NULL;
 }
 
-void *handler(void *arg) {
-    struct sockaddr_in client;
-    int connection;
+void *monitor_multiple(void *arg) {
+    int epoll_fd = epoll_create(2);
+    int res;
+    //char read_buffer[MSG_SIZE];
+    int unix_fd = unix_sock;
+    int inet_fd = inet_sock;
+
+    struct epoll_event inet_event, unix_event, events[MAX_EVENTS];
+
+    inet_event.events = EPOLLIN;
+    inet_event.data.fd = inet_fd;
+    res = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, inet_fd, &inet_event);
+
+    if (res) {
+        perror("inet_fd");
+        exit(-1);
+    }
+
+    unix_event.events = EPOLLIN;
+    unix_event.data.fd = unix_fd;
+    res = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, unix_fd, &unix_event);
+
+    if (res) {
+        perror("unix_fd");
+        exit(-1);
+    }
+    struct sockaddr_in inet_client;
+    struct sockaddr_un unix_client;
+
+    int conn_fd;
+
     while (flag) {
-        socklen_t clientsize = sizeof(client);
-        if ((connection = accept(sock, (struct sockaddr *) &client, &clientsize)) == -1) {
-            perror("RIP CONNECTION");
+        int event_count = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
+        if (event_count < 0) {
+            perror("events");
             exit(-1);
         }
-        handle_client(connection, &client, sock);
-        close(connection);
+        printf("%d ready events\n", event_count);
+
+        for (int i = 0; i < event_count; i++) {
+            int fd = events[i].data.fd;
+            printf("Reading file descriptor '%d'\n ", fd);
+
+            if (events[i].data.fd == unix_sock) {
+                socklen_t clientsize = sizeof(unix_client);
+                if ((conn_fd = accept(fd, (struct sockaddr *) &unix_client, &clientsize)) == -1) {
+                    perror("CONNECTION BROKE");
+                    exit(-1);
+                }
+                handle_client(conn_fd, (struct sockaddr_in *) &unix_client, fd);
+            } else if (events[i].data.fd == inet_sock) {
+                socklen_t clientsize = sizeof(inet_client);
+                if ((conn_fd = accept(fd, (struct sockaddr *) &inet_client, &clientsize)) == -1) {
+                    perror("CONNECTION BROKE");
+                    exit(-1);
+                }
+
+                handle_client(conn_fd, &inet_client, fd);
+
+                struct epoll_event conn_event;
+                conn_event.events = EPOLLIN;
+                conn_event.data.fd = conn_fd;
+                res = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, conn_fd, &conn_event);
+                if (res) {
+                    perror("conn_fd");
+                    exit(-1);
+                }
+            } else {
+                handle_client(conn_fd, NULL, fd);
+            }
+
+
+//            bytes_read = read(events[i].data.fd, read_buffer, MSG_SIZE);
+//            if (bytes_read < 0) perror("Error in epoll_wait!");
+//            printf("%d bytes read.\n", bytes_read);
+//            read_buffer[bytes_read] = '\0';
+//            printf("Read '%s'\n", read_buffer);
+        }
     }
     return NULL;
 }
@@ -189,7 +256,8 @@ void send_request(char *content) {
         struct client_node *tmp2 = tmp->next;
         if (tmp2->busy == 0) {
             tmp2->busy = 1;
-            sendto(tmp2->connection, buf, strlen(buf), 0, (struct sockaddr *) &tmp2->addr, sizeof(tmp2->addr));
+            printf("sending to %d", tmp2->sock);
+            sendto(tmp2->sock, buf, strlen(buf), 0, (struct sockaddr *) &tmp2->addr, sizeof(tmp2->addr));
             return;
         } else {
             tmp = tmp->next;
@@ -198,7 +266,7 @@ void send_request(char *content) {
 
     if (tmp->next != NULL) {
         tmp = clients->next;
-        sendto(tmp->connection, buf, strlen(buf), 0, (struct sockaddr *) &tmp->addr, sizeof(tmp->addr));
+        sendto(tmp->sock, buf, strlen(buf), 0, (struct sockaddr *) &tmp->addr, sizeof(tmp->addr));
     } else {
         printf("no one to send request to\n");
     }
@@ -237,7 +305,7 @@ void init_threads() {
         perror("Cannot create keepalive thread");
         exit(1);
     }
-    if (pthread_create(&handler_thread, NULL, handler, NULL) != 0) {
+    if (pthread_create(&handler_thread, NULL, monitor_multiple, NULL) != 0) {
         perror("Cannot create handler thread");
         exit(1);
     }
@@ -246,10 +314,9 @@ void init_threads() {
     pthread_join(handler_thread, NULL);
 }
 
-struct sockaddr_in inet_TCP_socket() {
-    /* Create the socket. */
+int inet_socket(int port, int CONN_MODE) {
     struct sockaddr_in addr;
-    sock = socket(AF_INET, SOCK_STREAM, 0);
+    int sock = socket(AF_INET, CONN_MODE, 0);
 
     int reuseaddr = 1;
     setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &reuseaddr, sizeof(reuseaddr));
@@ -258,10 +325,10 @@ struct sockaddr_in inet_TCP_socket() {
         exit(-1);
     };
 
-    /* Give the socket a name. */
     addr.sin_family = AF_INET;
-    addr.sin_port = htons(40000);
+    addr.sin_port = htons(port);
     addr.sin_addr.s_addr = htonl(INADDR_ANY);
+
     if (bind(sock, (struct sockaddr *) &addr, sizeof(addr)) < 0) {
         perror("UNABLE TO BIND");
         exit(-1);
@@ -271,22 +338,61 @@ struct sockaddr_in inet_TCP_socket() {
         exit(-1);
     };
 
-    printf("registered TCP inet socket on %u port %hu\n", addr.sin_addr.s_addr, addr.sin_port);
-
-    return addr;
+    printf("registered inet sock on %u port %hu\n", addr.sin_addr.s_addr, addr.sin_port);
+    return sock;
 }
 
-int main() {
-    char *address = "127.0.0.1";
+int unix_socket(char *path, int CONN_MODE) {
+    struct sockaddr_un addr;
+    int sock = socket(AF_UNIX, CONN_MODE, 0);
 
-    clients = calloc(1, sizeof(struct client_node));
-    strcpy(clients->name, "");
-    clients->next = NULL;
+    int reuseaddr = 1;
+    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &reuseaddr, sizeof(reuseaddr));
+    if (sock < 0) {
+        perror("UNABLE TO CREATE SOCKET");
+        exit(-1);
+    };
 
-    struct sockaddr_in addr = inet_TCP_socket();
-    struct client_node *tmp = clients;
+    /* Give the sock a name. */
+    addr.sun_family = AF_UNIX;
+    strcpy(addr.sun_path, path);
 
-    init_threads();
+    if (bind(sock, (struct sockaddr *) &addr, sizeof(addr)) < 0) {
+        perror("UNABLE TO BIND");
+        exit(-1);
+    }
+    if (listen(sock, 20) == -1) {
+        perror("UNABLE TO LISTEN");
+        exit(-1);
+    }
+
+    printf("registered unix sock on %s\n", path);
+
+    return sock;
+}
+
+void killf() {
+    close(unix_sock);
+    close(inet_sock);
+}
+
+int main(int args, char *argv[]) {
+    if (args == 3) {
+        atexit(killf);
+
+        int port = atoi(argv[1]);
+        clients = calloc(1, sizeof(struct client_node));
+        strcpy(clients->name, "");
+        clients->next = NULL;
+
+        char *unixpath = argv[2];
+        unlink(unixpath);
+        inet_sock = inet_socket(port, CONN_MODE);
+        unix_sock = unix_socket(unixpath, CONN_MODE);
+        init_threads();
+
+//    struct client_node *tmp = clients;
+    }
 
     return 0;
 }
