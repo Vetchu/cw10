@@ -66,6 +66,7 @@ int lookup(struct table *t, char *key) {
 
 char *parseText(char *text) {
 //    printf("%s\n",text);
+    if(text==NULL) return NULL;
     char *word = strtok(text, " ,-:/?!()[]\n");
     int sum = 1;
 

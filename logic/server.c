@@ -64,7 +64,6 @@ int is_used(char *name) {
 
 struct client_node *find_client(char *name) {
     struct client_node *tmp = clients;
-
     while (tmp != NULL) {
         if (strcmp(tmp->name, name) == 0)
             return tmp;
@@ -75,18 +74,19 @@ struct client_node *find_client(char *name) {
 
 void unregister(char *name) {
     struct client_node *tmp = clients;
-
+    printf("unregistering %s\n",name);
     while (tmp->next != NULL) {
         struct client_node *tmp2 = tmp->next;
         if (strcmp(name, tmp2->name) == 0) {
             tmp->next = tmp2->next;
             free(tmp2);
+            printf("unregistered\n");
             return;
         } else {
             tmp = tmp->next;
         }
     }
-    printf("no such client man");
+    printf("no such client\n");
 }
 
 void register_client(char *name, int connection, struct sockaddr *client_addr, int size) {
@@ -94,7 +94,16 @@ void register_client(char *name, int connection, struct sockaddr *client_addr, i
 
     printf("asked to register %s\n", name);
     if (is_used(name)) {
-        sendto(connection, PLACETAKEN, sizeof(PLACETAKEN), 0, (struct sockaddr *) &client_addr, sizeof(client_addr));
+        pthread_mutex_lock(&mutex);
+
+
+        if (CONN_MODE == SOCK_STREAM) {
+            send(connection, PLACETAKEN, sizeof(PLACETAKEN), 0);
+        } else {
+            sendto(connection, PLACETAKEN, sizeof(PLACETAKEN), 0, client_addr, sizeof(client_addr));
+        }
+        pthread_mutex_unlock(&mutex);
+
         printf("access denied, already exists\n");
     } else {
         struct client_node *new_client = calloc(1, sizeof(struct client_node));
@@ -111,13 +120,18 @@ void register_client(char *name, int connection, struct sockaddr *client_addr, i
         int sent = 0;
         printf("%lu size %d\n", sizeof(*client_addr),size);
 //        while (recvfrom(connection,NULL,1,0,client_addr,size)!=);
+        pthread_mutex_lock(&mutex);
+
         if (CONN_MODE == SOCK_STREAM) {
             sent = send(connection, "O", 1, 0);
         } else {
             sent = sendto(connection, "O", 1, 0, client_addr,  sizeof(*client_addr));
         }
+        pthread_mutex_unlock(&mutex);
+
         if (sent < 0)
             perror("sent register");
+        else
         printf("registered %s \n", name);
     }
 }
@@ -140,6 +154,8 @@ void *keep_alive(void *pVoid) {
             } else {
                 res = send(tmp2->conn, "PING", 4, MSG_NOSIGNAL);
             }
+            pthread_mutex_unlock(&mutex);
+
             if ((res < 0) || tmp2->last_appeared < currentTime - 20) {
                 perror("dead");
                 printf("\n%s IS KILL, UNREGISTERING\n", tmp2->name);
@@ -147,10 +163,9 @@ void *keep_alive(void *pVoid) {
                     close(tmp2->conn);
                 unregister(tmp2->name);
             } else {
-                printf("%s IS OK\n", tmp2->name);
+                printf("OK:\t%s\n", tmp2->name);
                 tmp = tmp->next;
             }
-            pthread_mutex_unlock(&mutex);
         }
     }
     return 0;
@@ -162,14 +177,14 @@ void handle_client(int connection, struct sockaddr *client, int socket) {
     memset(buf, 0, sizeof(buf));
 
     socklen_t len = sizeof(*client);
-//    if(connection==3){
-//        len=strlen(((struct sockaddr_un*)client)->sun_path);
-//    }
+    pthread_mutex_lock(&mutex);
     if (CONN_MODE == SOCK_DGRAM) {
         size = recvfrom(connection, buf, sizeof(buf), 0, client, &len);
     } else {
         size = recv(connection, buf, sizeof(buf), 0);
     }
+    pthread_mutex_unlock(&mutex);
+
     if (size <= 0) {
         perror("host closed connection\n");
         if (CONN_MODE == SOCK_STREAM)
@@ -221,12 +236,10 @@ void add_to_epoll(int epoll_fd, int fd) {
 
 void *monitor_multiple(void *arg) {
     epoll_fd = epoll_create(2);
-    int res;
     int unix_fd = unix_sock;
     int inet_fd = inet_sock;
 
-    struct epoll_event inet_event, events[MAX_EVENTS];
-
+    struct epoll_event events[MAX_EVENTS];
     add_to_epoll(epoll_fd, unix_fd);
     add_to_epoll(epoll_fd, inet_fd);
 
@@ -239,18 +252,18 @@ void *monitor_multiple(void *arg) {
         int event_count = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
 //        printf("events: %d\n", events[0].data.fd);
 
-        printf("%d ready events\n", event_count);
+//        printf("%d ready events\n", event_count);
 
         for (int i = 0; i < event_count; i++) {
             int fd = events[i].data.fd;
-            printf("Reading file descriptor '%d'\n", fd);
+//            printf("Reading file descriptor '%d'\n", fd);
 
             if (CONN_MODE == SOCK_DGRAM) {
                 if (events[i].data.fd == unix_sock) {
-                    printf("awaiting unix\n");
+//                    printf("awaiting unix\n");
                     handle_client(unix_sock, (struct sockaddr *) &unix_client, fd);
                 } else if (events[i].data.fd == inet_sock) {
-                    printf("awaiting inet\n");
+//                    printf("awaiting inet\n");
                     handle_client(inet_sock, (struct sockaddr *) &inet_client, fd);
                 } else {
                     perror("error, wrong fd");
@@ -294,9 +307,7 @@ void send_request(char *content) {
     double earliest_time = pobierz_sekundy();
     while (tmp->next != NULL) {
         struct client_node *tmp2 = tmp->next;
-        if (tmp2->last_calculated == 0) {
-            found = tmp2;
-        } else if (tmp2->last_calculated < earliest_time) {
+         if (tmp2->last_calculated < earliest_time) {
             earliest_time = tmp2->last_calculated;
             found = tmp2;
         }
@@ -308,17 +319,19 @@ void send_request(char *content) {
     } else {
         if (found->busy == 1) {
             printf("overflow, sending %d to %d\n", global_counter, tmp->conn);
-            sendto(tmp->conn, buf, sizeof(buf), 0, tmp->addr, tmp->addr_size);
         }
         found->busy = 1;
         found->last_calculated = pobierz_sekundy();
         printf("sending request %d to %d\n", global_counter, found->conn);
         int res;
+        pthread_mutex_lock(&mutex);
         if (CONN_MODE == SOCK_DGRAM) {
             res = sendto(found->conn, buf, sizeof(buf), 0, found->addr, found->addr_size);
         } else {
             res = send(found->conn, buf, sizeof(buf), 0);
         }
+        pthread_mutex_unlock(&mutex);
+
         if (res < 0)
             die("unable to send request");
         return;

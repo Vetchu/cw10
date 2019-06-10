@@ -11,11 +11,11 @@
 #define PORT 5000
 #define PLACETAKEN ""
 int bufferSize = 60000;
-//#ifdef DGRAM
+#ifdef DGRAM
 #define CONN_MODE SOCK_DGRAM
-//#else
-//#define CONN_MODE SOCK_STREAM
-//#endif
+#else
+#define CONN_MODE SOCK_STREAM
+#endif
 enum connectType {
     NETWORK,
     UNIX

@@ -11,6 +11,7 @@
 #include <pthread.h>
 #include <semaphore.h>
 #include <fcntl.h>
+#include <signal.h>
 #include "common.h"
 #include "../utils/hashmap.h"
 
@@ -28,13 +29,14 @@ struct sockaddr *addr;
 char *my_name;
 int sock;
 int flag = 1;
-
+int flag2 =1;
 char *parse_address(char *addr) {
     if (addr == NULL)
         die("BAD ADDRESS");
-
     return addr;
 }
+
+pthread_t pinger_thread;
 
 int inet_connect_socket_client(char *address, int port) {
     int sock = socket(AF_INET, CONN_MODE, 0);
@@ -60,7 +62,12 @@ int unix_connect_socket_client(char *path) {
 
     if (res < 0)
         die("unix connect");
-
+    unix_server_addr.sun_family = AF_UNIX;
+    strcpy(unix_server_addr.sun_path, my_name);
+    unlink(my_name);
+    res = bind(sock, (struct sockaddr *) &unix_server_addr, sizeof(unix_server_addr));
+    if (res < 0)
+        die("unix bind");
     return sock;
 }
 
@@ -74,6 +81,8 @@ void unregister_me() {
     ret = sendto(sock, buf, sizeof(buf), 0, (struct sockaddr *) &inet_server_addr, size);
     printf("Unregistered\n");
 
+    pthread_cancel(pinger_thread);
+    pthread_join(pinger_thread, NULL);
     if (CONN_MODE == SOCK_DGRAM)
         close(sock);
     sem_close(process_mutex);
@@ -85,6 +94,7 @@ void *process() {
         char *buf = dequeue(queue);
         char *counter = strtok(buf, " ");
         char *result = parseText(strtok(NULL, "|"));
+        if(result==NULL) continue;
         char buff[strlen(result) + strlen(my_name) + 10];
         memset(buff, 0, sizeof(buff));
         strcpy(buff, "RESULTS|");
@@ -94,36 +104,38 @@ void *process() {
         strcat(buff, "|");
         strcat(buff, result);
         int sent = 0;
+        if(flag2)
         pthread_mutex_lock(&mutex);
         if (CONN_MODE == SOCK_DGRAM) {
-            sent = sendto(sock, buff, sizeof(buff), 0, (struct sockaddr *) addr, addr_size);
+            sent = sendto(sock, buff, sizeof(buff), 0, NULL,0);
         } else {
             sent = send(sock, buff, sizeof(buff), 0);
         }
+        if(flag2)
         pthread_mutex_unlock(&mutex);
         if (sent < 0)
             perror("send?");
         printf("sent %d\n %s\n", sent, buff);
-        fflush(stdout);
         free(result);
         free(buf);
     }
     return NULL;
 }
 
-void register_me(int sock, struct sockaddr *server_addr, char *name, socklen_t* size) {
+void register_me(int sock, struct sockaddr *server_addr, char *name, socklen_t *size) {
     char buf[bufferSize];
     strcpy(buf, "INIT|");
     strcat(buf, name);
 
     printf("Trying to register as %s\n", name);
-    int sent=0;
+    int sent = 0;
+
     if (CONN_MODE == SOCK_DGRAM) {
-        sent=sendto(sock, buf, sizeof(buf), 0, server_addr, *size);
+        sent = sendto(sock, buf, sizeof(buf), 0, NULL, 0);
     } else {
-        sent=send(sock, buf, sizeof(buf), 0);
+        sent = send(sock, buf, sizeof(buf), 0);
     }
-    if(sent<0)
+    if (sent < 0)
         die("sent reg");
     memset(buf, 0, sizeof(buf));
     strcpy(buf, "PING");
@@ -139,12 +151,13 @@ void register_me(int sock, struct sockaddr *server_addr, char *name, socklen_t* 
     if (strcmp(buf, PLACETAKEN) == 0)
         die("MY NAME IS TAKEN\n COULD NOT CONNECT - DYING\n");
     else
-        printf("Registered %s\n", buf);
+        printf("Registered\n", buf);
 }
 
 int main(int args, char *argv[]) {
     if (args == 4) {
-        atexit(unregister_me);
+//        sighandler_t set;
+        signal(SIGINT, exit);
         queue = init_queue();
         my_name = argv[1];
         char *bufname = calloc(strlen(my_name) + 5, sizeof(char));
@@ -170,28 +183,26 @@ int main(int args, char *argv[]) {
             printf("connect on %s %d %d\n", addr_string, port, htons(port));
         }
 
-        pthread_t pinger_thread;
-
         if (pthread_create(&pinger_thread, NULL, process, NULL) != 0)
             die("Cannot create keep_alive thread");
 
-
         socklen_t size = sizeof(*addr);
-        register_me(sock, addr, my_name,&size);
-
+        register_me(sock, addr, my_name, &size);
         fflush(stdout);
 
         char buf[bufferSize];
         memset(buf, 0, sizeof(buf));
-
+        atexit(unregister_me);
 
         while (flag) {
             int packet_size;
+            flag2=1;
             if (CONN_MODE == SOCK_DGRAM) {
                 packet_size = recvfrom(sock, buf, sizeof(buf), 0, (struct sockaddr *) addr, &size);
             } else {
                 packet_size = recv(sock, buf, sizeof(buf), 0);
             }
+            flag2=0;
 
             if (packet_size <= 0)
                 die("Host closed connection");
