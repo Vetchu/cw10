@@ -87,7 +87,7 @@ char *parseText(char *text) {
             word_list->next = new_word;
         }
         sum++;
-//        sleep(1000);
+        usleep(100);
     } while ((word = strtok(NULL, " ,-:/?!()[]\n")) != NULL);
 
     char* buf=calloc(60000, sizeof(char));
@@ -99,7 +99,7 @@ char *parseText(char *text) {
         strcat(buf, keyval);
         tmp = tmp->next;
     }
-    printf("%s", buf);
+//    printf("%s", buf);
     while (word_list) {
         tmp = word_list;
         word_list = word_list->next;
@@ -115,5 +115,8 @@ char *parseText(char *text) {
     }
     free(t->list);
     free(t);
-    return buf;
+//    return buf;
+    char* buf1=calloc(10, sizeof(char));
+    sprintf(buf1,"%d",sum);
+    return  buf1;
 }
