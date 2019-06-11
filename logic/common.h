@@ -10,12 +10,13 @@
 #define MSG_SIZE 500
 #define PORT 5000
 #define PLACETAKEN ""
-int bufferSize = 60000;
-//#ifdef DGRAM
+int bufferSize = 32000;
+#ifdef DGRAM
 #define CONN_MODE SOCK_DGRAM
-//#else
-//#define CONN_MODE SOCK_STREAM
-//#endif
+#else
+#define CONN_MODE SOCK_STREAM
+#endif
+
 enum connectType {
     NETWORK,
     UNIX
@@ -38,7 +39,7 @@ int parse_port(char *portstring) {
 
     int port = strtol(portstring, NULL, 10);
 
-    if (port == 0)
+    if (port <= 0)
         die("BAD PORT NUM");
 
     return port;

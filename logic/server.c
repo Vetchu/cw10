@@ -31,6 +31,7 @@ struct client_node {
     enum connectType connection_type;
     int conn;
     struct sockaddr *addr;
+    socklen_t addr_size;
     struct client_node *next;
     double last_appeared;
     double last_calculated;
@@ -61,9 +62,8 @@ int is_used(char *name) {
     return 0;
 }
 
-struct client_node *find_client(char *name) {
+struct client_node *find_client_byname(char *name) {
     struct client_node *tmp = clients;
-
     while (tmp != NULL) {
         if (strcmp(tmp->name, name) == 0)
             return tmp;
@@ -72,50 +72,99 @@ struct client_node *find_client(char *name) {
     return NULL;
 }
 
-void unregister(char *name) {
+struct client_node *find_client_byaddr(struct sockaddr *addr) {
     struct client_node *tmp = clients;
-
-    while (tmp->next != NULL) {
-        struct client_node *tmp2 = tmp->next;
-        if (strcmp(name, tmp2->name) == 0) {
-            tmp->next = tmp2->next;
-            free(tmp2);
-            return;
-        } else {
-            tmp = tmp->next;
-        }
+    while (tmp != NULL) {
+        if (tmp->addr->sa_data == addr->sa_data)
+            return tmp;
+        tmp = tmp->next;
     }
-    printf("no such client man");
+    return NULL;
 }
 
-void register_client(char *name, int socket, struct sockaddr *client_addr, int size) {
+struct client_node *find_client_byconn(int conn) {
+    struct client_node *tmp = clients;
+    while (tmp != NULL) {
+        if (tmp->conn == conn)
+            return tmp;
+        tmp = tmp->next;
+    }
+    return NULL;
+}
+
+void unregister(char *name) {
+    struct client_node *tmp = clients;
+    pthread_mutex_lock(&mutex);
+    if (name != NULL) {
+        printf("unregistering %s\n", name);
+        while (tmp->next != NULL) {
+            struct client_node *tmp2 = tmp->next;
+            if (strcmp(name, tmp2->name) == 0) {
+                tmp->next = tmp2->next;
+                free(tmp2);
+                printf("unregistered\n");
+                pthread_mutex_unlock(&mutex);
+                return;
+            } else {
+                tmp = tmp->next;
+            }
+        }
+        printf("no such client\n");
+    }
+    pthread_mutex_unlock(&mutex);
+}
+
+void register_client(char *name, int connection, struct sockaddr *client_addr, int size) {
     fflush(stdout);
 
     printf("asked to register %s\n", name);
+    sleep(1);
+
     if (is_used(name)) {
-        sendto(socket, PLACETAKEN, sizeof(PLACETAKEN), 0, (struct sockaddr *) &client_addr, sizeof(client_addr));
-        printf("access denied, already exists\n");
+        int sent = 0;
+        pthread_mutex_lock(&mutex);
+
+        if (CONN_MODE == SOCK_STREAM) {
+            sent = send(connection, "P", 1, 0);
+        } else {
+            sent = sendto(connection, "P", 1, 0, client_addr, sizeof(*client_addr));
+        }
+
+        pthread_mutex_unlock(&mutex);
+        if (sent < 0)
+            die("SENT CANT REGISTER");
+        else
+            printf("access denied, already exists\n");
+
+        return;
     } else {
         struct client_node *new_client = calloc(1, sizeof(struct client_node));
         strcpy(new_client->name, name);
         new_client->addr = calloc(1, sizeof(struct sockaddr));
         memcpy(new_client->addr, client_addr, sizeof(struct sockaddr));
-        new_client->conn = socket;
+        new_client->addr_size = size;
+        new_client->conn = connection;
         new_client->next = clients->next;
         new_client->last_calculated = 0;
         new_client->last_appeared = pobierz_sekundy();
         clients->next = new_client;
-        sleep(1);
         int sent = 0;
-        printf("%lu\n", sizeof(client_addr));
+//        printf("%lu size %d\n", sizeof(*client_addr),size);
+//        while (recvfrom(connection,NULL,1,0,client_addr,size)!=);
+        pthread_mutex_lock(&mutex);
         if (CONN_MODE == SOCK_STREAM) {
-            sent = send(socket, "O", 1, 0);
+//            printf("essa2\n");
+            sent = send(connection, "O", 1, 0);
         } else {
-            sent = sendto(socket, "O", 1, 0, client_addr, size);
+            sent = sendto(connection, "O", 1, 0, client_addr, sizeof(*client_addr));
         }
+
+        pthread_mutex_unlock(&mutex);
+
         if (sent < 0)
             perror("sent register");
-        printf("registered %s \n", name);
+        else
+            printf("registered %s \n", name);
     }
 }
 
@@ -133,10 +182,12 @@ void *keep_alive(void *pVoid) {
             int res;
             pthread_mutex_lock(&mutex);
             if (CONN_MODE == SOCK_DGRAM) {
-                res = sendto(tmp2->conn, "PING", 4, MSG_NOSIGNAL, tmp2->addr, sizeof(tmp2->addr));
+                res = sendto(tmp2->conn, "PING", 4, 0, tmp2->addr, tmp2->addr_size);
             } else {
                 res = send(tmp2->conn, "PING", 4, MSG_NOSIGNAL);
             }
+            pthread_mutex_unlock(&mutex);
+
             if ((res < 0) || tmp2->last_appeared < currentTime - 20) {
                 perror("dead");
                 printf("\n%s IS KILL, UNREGISTERING\n", tmp2->name);
@@ -144,10 +195,9 @@ void *keep_alive(void *pVoid) {
                     close(tmp2->conn);
                 unregister(tmp2->name);
             } else {
-                printf("%s IS OK\n", tmp2->name);
+                printf("OK:\t%s\n", tmp2->name);
                 tmp = tmp->next;
             }
-            pthread_mutex_unlock(&mutex);
         }
     }
     return 0;
@@ -157,16 +207,26 @@ void handle_client(int connection, struct sockaddr *client, int socket) {
     char buf[bufferSize];
     int size;
     memset(buf, 0, sizeof(buf));
+
     socklen_t len = sizeof(*client);
+    pthread_mutex_lock(&mutex);
     if (CONN_MODE == SOCK_DGRAM) {
         size = recvfrom(connection, buf, sizeof(buf), 0, client, &len);
     } else {
         size = recv(connection, buf, sizeof(buf), 0);
     }
+    pthread_mutex_unlock(&mutex);
+
     if (size <= 0) {
         perror("host closed connection\n");
         if (CONN_MODE == SOCK_STREAM)
             epoll_ctl(epoll_fd, EPOLL_CTL_DEL, connection, 0);
+
+        if (CONN_MODE == SOCK_STREAM) {
+            unregister(find_client_byconn(connection)->name);
+        } else {
+            unregister(find_client_byaddr(client)->name);
+        }
         return;
     }
 //    printf("rozmiar paczki: %d\n"
@@ -177,13 +237,13 @@ void handle_client(int connection, struct sockaddr *client, int socket) {
     char *command = strtok(buf, "|");
     char *from = strtok(NULL, "|");
     if (from == NULL) {
-        printf("INCORRECT COMMAND ARRIVED:\n");
-        if (command != NULL)
-            printf("%s\n", command);
-        return;
+//        printf("INCORRECT COMMAND ARRIVED:\n");
+//        if (command != NULL)
+//            printf("%s\n", command);
+//        return;
     } else {
         if (strncmp(command, "PONG", 4) == 0) {
-            struct client_node *tmp = find_client(from);
+            struct client_node *tmp = find_client_byname(from);
             if (tmp != NULL)
                 tmp->last_appeared = pobierz_sekundy();
         } else if (strcmp(command, "INIT") == 0) {
@@ -196,7 +256,7 @@ void handle_client(int connection, struct sockaddr *client, int socket) {
             if (result != NULL) {
                 printf("\nCOMMAND: %s\nFROM: %s\nRESULTS:\n%s\n", which, from, result);
             }
-            find_client(from)->busy = 0;
+            find_client_byname(from)->busy = 0;
         }
     }
 
@@ -214,17 +274,12 @@ void add_to_epoll(int epoll_fd, int fd) {
 
 void *monitor_multiple(void *arg) {
     epoll_fd = epoll_create(2);
-    int res;
     int unix_fd = unix_sock;
     int inet_fd = inet_sock;
 
-    struct epoll_event inet_event, events[MAX_EVENTS];
-
+    struct epoll_event events[MAX_EVENTS];
     add_to_epoll(epoll_fd, unix_fd);
     add_to_epoll(epoll_fd, inet_fd);
-
-    if (res)
-        die("unix_fd");
 
     struct sockaddr_in inet_client;
     struct sockaddr_un unix_client;
@@ -235,18 +290,18 @@ void *monitor_multiple(void *arg) {
         int event_count = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
 //        printf("events: %d\n", events[0].data.fd);
 
-        printf("%d ready events\n", event_count);
+//        printf("%d ready events\n", event_count);
 
         for (int i = 0; i < event_count; i++) {
             int fd = events[i].data.fd;
-            printf("Reading file descriptor '%d'\n", fd);
+//            printf("Reading file descriptor '%d'\n", fd);
 
             if (CONN_MODE == SOCK_DGRAM) {
                 if (events[i].data.fd == unix_sock) {
-                    printf("awaiting unix\n");
+//                    printf("awaiting unix\n");
                     handle_client(unix_sock, (struct sockaddr *) &unix_client, fd);
                 } else if (events[i].data.fd == inet_sock) {
-                    printf("awaiting inet\n");
+//                    printf("awaiting inet\n");
                     handle_client(inet_sock, (struct sockaddr *) &inet_client, fd);
                 } else {
                     perror("error, wrong fd");
@@ -260,7 +315,6 @@ void *monitor_multiple(void *arg) {
 
                     add_to_epoll(epoll_fd, conn_fd);
                 } else if (fd == inet_sock) {
-
                     socklen_t csize = sizeof(inet_client);
                     if ((conn_fd = accept(fd, (struct sockaddr *) &inet_client, &csize)) == -1)
                         die(" INET CONNECTION BROKE");
@@ -290,9 +344,7 @@ void send_request(char *content) {
     double earliest_time = pobierz_sekundy();
     while (tmp->next != NULL) {
         struct client_node *tmp2 = tmp->next;
-        if (tmp2->last_calculated == 0) {
-            found = tmp2;
-        } else if (tmp2->last_calculated < earliest_time) {
+        if (tmp2->last_calculated < earliest_time) {
             earliest_time = tmp2->last_calculated;
             found = tmp2;
         }
@@ -304,17 +356,19 @@ void send_request(char *content) {
     } else {
         if (found->busy == 1) {
             printf("overflow, sending %d to %d\n", global_counter, tmp->conn);
-            sendto(tmp->conn, buf, strlen(buf), 0, (struct sockaddr *) &tmp->addr, sizeof(tmp->addr));
         }
         found->busy = 1;
         found->last_calculated = pobierz_sekundy();
         printf("sending request %d to %d\n", global_counter, found->conn);
         int res;
+        pthread_mutex_lock(&mutex);
         if (CONN_MODE == SOCK_DGRAM) {
-            res = sendto(found->conn, buf, strlen(buf), MSG_NOSIGNAL, found->addr, sizeof(found->addr));
+            res = sendto(found->conn, buf, sizeof(buf), 0, found->addr, found->addr_size);
         } else {
-            res = send(found->conn, buf, strlen(buf), MSG_NOSIGNAL);
+            res = send(found->conn, buf, sizeof(buf), 0);
         }
+        pthread_mutex_unlock(&mutex);
+
         if (res < 0)
             die("unable to send request");
         return;
@@ -388,7 +442,7 @@ int inet_socket(int port) {
 
 int unix_socket(char *path) {
     struct sockaddr_un addr;
-    int sock = socket(AF_UNIX, CONN_MODE, 0);
+    int sock = socket(AF_UNIX, CONN_MODE | O_NONBLOCK, 0);
 
     int reuseaddr = 1;
     setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &reuseaddr, sizeof(reuseaddr));
@@ -427,8 +481,10 @@ int main(int args, char *argv[]) {
         unlink(unixpath);
         inet_sock = inet_socket(port);
         unix_sock = unix_socket(unixpath);
-        struct client_node *tmp = clients;
+//        struct client_node *tmp = clients;
         init_threads();
+    } else {
+        fprintf(stderr, "ARGS?\n");
     }
 
     return 0;
